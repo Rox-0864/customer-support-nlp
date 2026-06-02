@@ -38,7 +38,7 @@ class DataProcessor:
     @staticmethod
     def normalize_text(text: str) -> str:
         """
-        Normaliza un texto: lowercase, NFKC, elimina espacios múltiples, strip.
+        Normaliza un texto: NFKC, elimina espacios múltiples, strip.
 
         Args:
             text: Texto de entrada.
@@ -46,7 +46,6 @@ class DataProcessor:
         Returns:
             Texto normalizado.
         """
-        text = text.lower()
         text = unicodedata.normalize("NFKC", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text
@@ -115,7 +114,7 @@ if __name__ == "__main__":
     # Test 1: Normalización
     dp = DataProcessor()
     result = dp.normalize_text("  HOLA   MUNDO!!  ")
-    expected = "hola mundo!!"
+    expected = "HOLA MUNDO!!"
     assert result == expected, f"normalize_text failed: {result!r} != {expected!r}"
     print(f"✅ Test 1 — normalize_text: {result!r}")
 

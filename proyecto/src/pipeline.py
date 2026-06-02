@@ -1,6 +1,5 @@
 from __future__ import annotations
 import logging
-import os
 from collections import Counter
 from typing import List
 
@@ -12,16 +11,13 @@ from src.models.sentiment import SentimentClassifier
 from src.models.intent import IntentClassifier
 
 
-_BASE = os.path.dirname(os.path.abspath(__file__))
-
-
 class ConversaAIPipeline:
     def __init__(self, sentiment_model: str = None,
                  intent_model: str = None,
                  tokenizer_model: str = None):
-        sentiment_model = sentiment_model or os.path.join(_BASE, "models", "sentiment")
-        intent_model = intent_model or os.path.join(_BASE, "models", "intent")
-        tokenizer_model = tokenizer_model or os.path.join(_BASE, "models", "sentiment")
+        sentiment_model = sentiment_model or "Rosela/xlm-r-sentiment-espt"
+        intent_model = intent_model or "Rosela/xlm-r-intent-espt"
+        tokenizer_model = tokenizer_model or "Rosela/xlm-r-sentiment-espt"
         self.data_processor = DataProcessor(model_name=tokenizer_model)
         self.sentiment_classifier = SentimentClassifier(self.data_processor, model_name=sentiment_model)
         self.intent_classifier = IntentClassifier(self.data_processor, model_name=intent_model)

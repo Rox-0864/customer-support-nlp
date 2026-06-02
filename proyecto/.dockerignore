@@ -16,3 +16,6 @@ data/processed
 Dockerfile
 README.md
 AGENTS.md
+# Modelos locales (se descargan de HF Hub durante el build)
+src/models/sentiment/
+src/models/intent/
