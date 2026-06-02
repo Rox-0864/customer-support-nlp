@@ -408,26 +408,66 @@ Primero validar el negocio, después escalar la arquitectura.
 
 ## 11. Estructura del Proyecto
 
+> **NOTA**: La estructura original tenía todo dentro de `proyecto/`. Se reorganizó a una estructura plana profesional. Acá está la explicación de por qué.
+
 ```
-ConversaAI/
-├── app.py                          ← Dashboard Streamlit principal
-├── requirements.txt                ← Dependencias
-├── proyecto/
-│   ├── Dockerfile                  ← Ya no se usa (referencia)
-│   ├── data/
-│   │   └── corpus_demo_bilingue.csv  ← 108 mensajes demo ES/PT
-│   ├── notebooks/
-│   │   ├── sentiment_xlmr.ipynb.py  ← Fine-tuning sentimiento
-│   │   └── intent_xlmr.ipynb.py     ← Fine-tuning intención
-│   └── src/
-│       ├── pipeline.py              ← Orquestador
-│       ├── data/processor.py        ← Normalización ES/PT
-│       ├── models/sentiment.py      ← SentimentClassifier
-│       ├── models/intent.py         ← IntentClassifier
-│       └── features/churn.py        ← ChurnScorer heurístico
-├── dashboard-streamlit/            ← Versión anterior (referencia)
-└── README.md
+customer-support-nlp/
+├── app.py                          ← Dashboard Streamlit (deployado en HF Space)
+├── dashboard-streamlit/
+│   └── dashboard_app.py            ← Dashboard extendido (explorador, churn slider, etc.)
+├── src/                            ← Código fuente del pipeline (package Python)
+│   ├── pipeline.py                 ← Orquestador ConversaAIPipeline
+│   ├── data/processor.py           ← DataProcessor: normalización + tokenización
+│   ├── models/sentiment.py         ← SentimentClassifier (XLM-R + fallback)
+│   ├── models/intent.py            ← IntentClassifier (XLM-R + fallback)
+│   └── features/churn.py           ← ChurnScorer heurístico
+├── scripts/
+│   └── pipeline_fallback.py        ← Pipeline 100% offline basado en keywords/regex
+├── notebooks/
+│   ├── sentiment_xlmr.ipynb.py     ← Fine-tuning XLM-R para sentimiento
+│   └── intent_xlmr.ipynb.py        ← Fine-tuning XLM-R para intención
+├── data/
+│   └── corpus_demo_bilingue.csv    ← 109 mensajes demo ES/PT
+├── tests/                          ← Suite de tests (61 tests pytest)
+│   ├── test_churn.py               ← 19 tests: scoring, pesos, frustración ES/PT
+│   ├── test_pipeline_fallback.py   ← 35 tests: sentimiento, intención, churn, batch
+│   └── test_processor.py           ← 7 tests: normalización de texto
+├── .github/workflows/
+│   ├── ci.yml                      ← CI: corre tests automáticamente en push/PR
+│   └── pages.yml                   ← Deploy dashboard-web a GitHub Pages
+├── Dockerfile                      ← Imagen Docker con precarga de modelos HF
+├── requirements.txt                ← Dependencias fusionadas (un solo archivo)
+├── README.md                       ← Documentación principal con badges
+└── APUNTES.md                      ← Esta guía de estudio
 ```
+
+### ¿Por qué es importante esta estructura?
+
+#### 1. Primera impresión profesional
+
+Un recruiter o ingeniero que entra al repo ve al instante que es un proyecto serio. `src/`, `tests/`, `.github/workflows/` hablan solos. `proyecto/` suena a tarea de curso, no a proyecto real.
+
+#### 2. `pip install -e .` compatible
+
+Con `src/` en la raíz podés hacer:
+
+```bash
+pip install -e .
+```
+
+Y el paquete queda instalado en el entorno. Con `proyecto/src/` necesitás andar manipulando `sys.path` manualmente en cada script (como se hacía antes en `dashboard_app.py`). Todos los proyectos open source serios (FastAPI, Pydantic, Transformers) usan esta estructura.
+
+#### 3. Tests visibles
+
+`tests/` al mismo nivel que `src/` comunica que hay cobertura de código. 61 tests documentan que el pipeline está verificado. El badge verde de CI en el README es prueba viva.
+
+#### 4. CI integrado
+
+Cada vez que hacés push a main, GitHub Actions corre los 61 tests automáticamente. Si alguien abre un PR y rompe algo, salta una alerta roja. Eso es ingeniería de software, no un script tirado ahí.
+
+#### 5. Estándar de la industria
+
+Esta estructura (src/, tests/, CI, README con badges) es la que usan los repositorios de FastAPI, Pydantic, Transformers de Hugging Face, etc. Cuando un recruiter ve eso, sabe que no estás codeando porque "funciona en mi máquina".
 
 ---
 
