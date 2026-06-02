@@ -11,7 +11,7 @@ from transformers import pipeline
 st.set_page_config(page_title="ConversaAI Analytics", page_icon="🤖", layout="wide")
 
 # Ruta al dataset de demostración
-SAMPLE_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proyecto", "data", "corpus_demo_bilingue.csv")
+SAMPLE_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "corpus_demo_bilingue.csv")
 
 # MAPA DE MACRO-INTENCIONES (grupos de negocio)
 MACRO_INTENT_MAP = {

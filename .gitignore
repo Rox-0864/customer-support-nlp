@@ -40,12 +40,15 @@ Thumbs.db
 
 # Models locales (pesados ~2.2GB, descargar de Drive)
 /models/
-proyecto/src/models/sentiment/
-proyecto/src/models/intent/
+src/models/sentiment/
+src/models/intent/
 
 # Datos raw y outputs
-proyecto/data/raw/
-proyecto/outputs/
+data/raw/
+outputs/
 
 # Scripts archivados
-proyecto/scripts/archive/
+scripts/archive/
+
+# pytest
+.pytest_cache/

@@ -21,9 +21,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # ── Importar el pipeline ─────────────────────────────────────────────────────
-_PROYECTO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "proyecto")
-if _PROYECTO_DIR not in sys.path:
-    sys.path.insert(0, _PROYECTO_DIR)
+_ROOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
 
 try:
     from src.pipeline import ConversaAIPipeline
@@ -46,8 +46,8 @@ st.set_page_config(
 # CONSTANTES
 # ===================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH = os.path.join(BASE_DIR, "..", "proyecto", "data")
-SAMPLE_CSV = os.path.join(BASE_DIR, "..", "proyecto", "data", "corpus_demo_bilingue.csv")
+DATA_PATH = os.path.join(BASE_DIR, "..", "data")
+SAMPLE_CSV = os.path.join(BASE_DIR, "..", "data", "corpus_demo_bilingue.csv")
 
 INTENT_LABELS = [
     "cancelacion", "consulta_general", "facturacion_pago", "feedback",
