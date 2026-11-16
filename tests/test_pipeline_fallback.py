@@ -76,6 +76,15 @@ class TestIntent:
         result = pipeline.predict_intent("Quiero la cancelación del pedido")
         assert result["intent"] == "cancelacion"
 
+    @pytest.mark.parametrize("text", [
+        "quiero cancelar mi pedido",
+        "cancelar mi cuenta",
+        "quiero anular la suscripción",
+        "quiero cancelar el servicio",
+    ])
+    def test_cancelacion_verbos_es(self, pipeline, text):
+        assert pipeline.predict_intent(text)["intent"] == "cancelacion"
+
     def test_queja_es(self, pipeline):
         result = pipeline.predict_intent("Esto es inaceptable, pésimo servicio")
         assert result["intent"] == "queja"

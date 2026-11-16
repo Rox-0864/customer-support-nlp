@@ -63,8 +63,8 @@ SENTIMENT_KEYWORDS = {
 
 INTENT_PATTERNS: Dict[str, List[Dict[str, List[str]]]] = {
     "cancelacion": [
-        {"es": [r"cancel.a", r"cancelaci[oó]n", r"anul.a", r"baja", r"cancelamento", r"desuscrib"]},
-        {"pt": [r"cancel.a", r"cancelamento", r"anul.a", r"baixa", r"cancelar", r"desinscrev"]},
+        {"es": [r"cancel", r"cancelaci[oó]n", r"anul", r"baja", r"cancelamento", r"desuscrib"]},
+        {"pt": [r"cancel", r"cancelamento", r"anul", r"baixa", r"cancelar", r"desinscrev"]},
     ],
     "consulta_general": [
         {"es": [r"consulta", r"pregunt", r"duda", r"informaci[oó]n", r"qu[ie]ro saber",
@@ -86,22 +86,22 @@ INTENT_PATTERNS: Dict[str, List[Dict[str, List[str]]]] = {
                 r"adorei", r"excelente", r"genial", r"melhor", r"quero opinar", r"avalia[cç][aã]o"]},
     ],
     "gestion_cuenta": [
-        {"es": [r"cambi.ar mi", r"actualizar mi", r"modificar mi", r"cuenta", r"datos",
+        {"es": [r"cambiar mi", r"actualizar mi", r"modificar mi", r"cuenta", r"datos",
                 r"contraseñ", r"correo", r"email", r"direcci[oó]n", r"tel[eé]fono",
                 r"usuario", r"registr", r"perfil"]},
-        {"pt": [r"cambi.ar m", r"atualizar m", r"modificar m", r"conta", r"dados",
+        {"pt": [r"cambiar m", r"atualizar m", r"modificar m", r"conta", r"dados",
                 r"senha", r"correio", r"email", r"endere[çc]o", r"telefone",
                 r"usu[aá]rio", r"registr", r"perfil"]},
     ],
     "modificacion_pedido": [
-        {"es": [r"modific.ar mi pedido", r"cambi.ar mi pedido", r"actualizar mi pedido",
-                r"pedido", r"compro", r"compra", r"orden", r"cambi.ar talla",
-                r"cambi.ar color", r"cambi.ar direcci[oó]n", r"cancelar pedido",
-                r"modifica.pedido"]},
+        {"es": [r"modificar mi pedido", r"cambiar mi pedido", r"actualizar mi pedido",
+                r"pedido", r"compro", r"compra", r"orden", r"cambiar talla",
+                r"cambiar color", r"cambiar direcci[oó]n", r"cancelar pedido",
+                r"modificar pedido"]},
         {"pt": [r"modificar meu pedido", r"alterar meu pedido", r"atualizar meu pedido",
                 r"pedido", r"comprei", r"compra", r"ordem", r"trocar tamanho",
                 r"trocar cor", r"mudar endere[çc]o", r"cancelar pedido",
-                r"modifica.pedido"]},
+                r"modificar pedido"]},
     ],
     "queja": [
         {"es": [r"queja", r"reclamo", r"indignad", r"inaceptable", r"verguenza",
