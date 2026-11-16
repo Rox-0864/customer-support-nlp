@@ -4,8 +4,6 @@ from scripts.pipeline_fallback import (
     detect_language,
     SENTIMENT_KEYWORDS,
     INTENT_PATTERNS,
-    FRUSTRATION_KEYWORDS,
-    HIGH_CHURN_INTENTS,
 )
 
 
@@ -140,15 +138,6 @@ class TestChurn:
         intent = pipeline.predict_intent("Excelente servicio, gracias")
         result = pipeline.compute_churn("Excelente servicio, gracias", sentiment, intent)
         assert result["aggregate_score"] <= 0.5
-
-    def test_high_churn_intents(self):
-        assert "cancelacion" in HIGH_CHURN_INTENTS
-        assert "queja" in HIGH_CHURN_INTENTS
-        assert "reembolso" in HIGH_CHURN_INTENTS
-
-    def test_frustration_keywords_not_empty(self):
-        assert len(FRUSTRATION_KEYWORDS["es"]) > 0
-        assert len(FRUSTRATION_KEYWORDS["pt"]) > 0
 
 
 class TestPipeline:

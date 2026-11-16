@@ -1,5 +1,11 @@
+import os
 import re
+import sys
 from typing import List, Dict, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.features.churn import ChurnScorer
 
 SENTIMENT_KEYWORDS = {
     "positive": {
@@ -125,23 +131,6 @@ INTENT_PATTERNS: Dict[str, List[Dict[str, List[str]]]] = {
     ],
 }
 
-FRUSTRATION_KEYWORDS = {
-        "es": [
-            "urge", "urgente", r"\bya\b", "inmediatamente", "r[áa]pido", "no aguanto m[áa]s",
-        "harto", "cansado", "basta", "ya es demasiado", "no es posible",
-        "es una broma", "en serio", "días esperando", "semanas esperando",
-        "no voy a pagar", "exijo", "exigimos",
-    ],
-    "pt": [
-        "urgente", "j[áa]", "imediatamente", "r[aá]pido", "n[aã]o aguento mais",
-        " farto", "cansado", "basta", "j[áa] é demais", "n[aã]o é poss[ií]vel",
-        "é uma piada", "sério", "dias esperando", "semanas esperando",
-        "n[aã]o vou pagar", "exijo",
-    ],
-}
-
-HIGH_CHURN_INTENTS = {"cancelacion", "queja", "reembolso"}
-
 def detect_language(text: str) -> str:
     text_lower = text.lower()
     pt_markers = ["ão", "çã", "õe", "você", "vc", "obrigad", "gostari", "adorei",
@@ -152,6 +141,7 @@ def detect_language(text: str) -> str:
 class FallbackPipeline:
     def __init__(self):
         self._status = {"sentiment": "fallback", "intent": "fallback"}
+        self._churn_scorer = ChurnScorer()
 
     def predict_sentiment(self, text: str) -> dict:
         if not text or not text.strip():
@@ -213,14 +203,14 @@ class FallbackPipeline:
 
     def predict_intent(self, text: str) -> dict:
         if not text or not text.strip():
-            return {"intent": "consulta_general", "probability": 0.5}
+            probs = {intent: 0.0 for intent in INTENT_PATTERNS}
+            probs["consulta_general"] = 1.0
+            return {"intent": "consulta_general", "probability": 1.0, "probabilities": probs}
 
         lang = detect_language(text)
         text_lower = text.lower()
 
-        best_intent = "consulta_general"
-        best_score = 0.0
-
+        scores = {}
         for intent, patterns_list in INTENT_PATTERNS.items():
             score = 0.0
             for pattern_group in patterns_list:
@@ -228,42 +218,24 @@ class FallbackPipeline:
                 for pattern in patterns:
                     if re.search(pattern, text_lower):
                         score += 1.0
-            if score > best_score:
-                best_score = score
-                best_intent = intent
+            scores[intent] = score
 
-        if best_score == 0:
+        total = sum(scores.values())
+        if total <= 0:
             best_intent = "consulta_general"
-            best_score = 0.3
+            best_prob = 0.3
+            probabilities = {intent: 0.0 for intent in INTENT_PATTERNS}
+            probabilities["consulta_general"] = 1.0
+        else:
+            best_intent = max(scores, key=scores.get)
+            best_prob = min(scores[best_intent] / total, 0.95)
+            probabilities = {intent: scores[intent] / total for intent in INTENT_PATTERNS}
 
-        prob = min(best_score / 3.0, 0.95)
-        return {"intent": best_intent, "probability": prob}
+        return {"intent": best_intent, "probability": best_prob, "probabilities": probabilities}
 
     def compute_churn(self, text: str, sentiment: dict, intent: dict) -> dict:
-        lang = detect_language(text)
-        text_lower = text.lower()
-
-        # Sentiment contribution
-        sent_neg_prob = sentiment["probabilities"]["negative"]
-        sentiment_contrib = sent_neg_prob * 0.5
-
-        # Frustration keywords contribution
-        frust_kw = FRUSTRATION_KEYWORDS.get(lang, FRUSTRATION_KEYWORDS["es"])
-        frust_count = sum(1 for kw in frust_kw if re.search(kw, text_lower))
-        frustration_contrib = min(frust_count * 0.15, 0.3)
-
-        # Intent contribution
-        intent_name = intent["intent"]
-        intent_contrib = 0.2 if intent_name in HIGH_CHURN_INTENTS else 0.0
-
-        aggregate = min(sentiment_contrib + frustration_contrib + intent_contrib, 1.0)
-
-        return {
-            "aggregate_score": round(aggregate, 4),
-            "sentiment_contribution": round(sentiment_contrib, 4),
-            "frustration_contribution": round(frustration_contrib, 4),
-            "intent_contribution": round(intent_contrib, 4),
-        }
+        """Calcula el churn con la misma fórmula que el pipeline principal (ChurnScorer)."""
+        return self._churn_scorer.score(sentiment, intent, text)
 
     def predict(self, text: str) -> dict:
         sentiment = self.predict_sentiment(text)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from typing import Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,41 @@ class SentimentClassifier:
         if self._model is not None:
             return self._predict_xlmr(text)
         return self._predict_fallback(text)
+
+    def predict_sentiment_batch(self, texts: List[str]) -> List[dict]:
+        if self._model is not None:
+            return self._predict_xlmr_batch(texts)
+        return [self.predict_sentiment(text) for text in texts]
+
+    def _predict_xlmr_batch(self, texts: List[str]) -> List[dict]:
+        if not texts:
+            return []
+        tokenized_batch = self.data_processor.process_batch(texts, batch_size=len(texts))
+        input_ids = torch.tensor(
+            [d["input_ids"] for d in tokenized_batch], dtype=torch.long
+        )
+        attention_mask = torch.tensor(
+            [d["attention_mask"] for d in tokenized_batch], dtype=torch.long
+        )
+
+        with torch.no_grad():
+            outputs = self._model(input_ids=input_ids, attention_mask=attention_mask)
+            probabilities = F.softmax(outputs.logits, dim=-1)
+
+        results = []
+        for probs_list in probabilities.tolist():
+            confidence = max(probs_list)
+            label = self.LABELS[probs_list.index(confidence)]
+            results.append(
+                {
+                    "label": label,
+                    "probability": confidence,
+                    "probabilities": {
+                        lbl: float(p) for lbl, p in zip(self.LABELS, probs_list)
+                    },
+                }
+            )
+        return results
 
     def _predict_xlmr(self, text: str) -> dict:
         tokenized = self.data_processor.process(text)

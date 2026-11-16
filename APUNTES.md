@@ -1,7 +1,7 @@
 # 📚 Apuntes — ConversaAI
 
 > Guía de estudio del pipeline de NLP, dashboard, y decisiones de arquitectura.
-> Creada el 30/05/2026.
+> Creada el 30/05/2026 · Actualizada el 16/11/2026 (refactor de unificación: reglas de negocio, churn y dashboards).
 
 ---
 
@@ -34,22 +34,30 @@ Mensaje → XLM-R (sentimiento) → 3 clases
 
 Regla simple basada en experiencia, NO un modelo ML. Son IF/ELSE que codifican conocimiento de negocio. Es un MVP — si en el futuro tienen datos de churn real, se reemplaza por un clasificador entrenado.
 
-### Cálculo de riesgo de churn (`app.py`)
+### Cálculo de riesgo de churn (`ChurnScorer` + `categorize_churn`)
+
+El churn se calcula en **una sola fórmula** (`src/features/churn.py`), compartida por el pipeline principal y el fallback:
 
 ```python
-INTENCIONES_CRITICAS = ['cancel_order', 'complaint', 'get_refund', 'payment_issue', 'delete_account']
-
-def calcular_riesgo_churn(row):
-    if row['Micro-Intención'] == 'delete_account':
-        return 'Alto Riesgo'                    # 🔴 El usuario se quiere ir ya
-    elif row['Sentimiento'] == 'Negative' and row['Micro-Intención'] in INTENCIONES_CRITICAS:
-        return 'Alto Riesgo'                    # 🔴 Frustrado + intención crítica
-    elif row['Sentimiento'] == 'Negative' or row['Micro-Intención'] == 'contact_customer_service':
-        return 'Riesgo Medio'                   # 🟠 Algo no está bien
-    return 'Riesgo Bajo'                        # 🟢 Happy path
+# ChurnScorer.score() — score continuo en [0, 1]
+churn = w1 * sent_prob_negative + w2 * frust_flag + w3 * max(intent_risk_probs)
+# Pesos default: w1=0.3, w2=0.35, w3=0.35
 ```
 
-Se convierte a número para promedios: `Alto=0.90`, `Medio=0.45`, `Bajo=0.10`.
+Luego el score se convierte a categoría de negocio con `categorize_churn()` (`src/features/business_rules.py`):
+
+```python
+def categorize_churn(score, intent=None):
+    if intent == "delete_account":        # 🔴 Eliminar cuenta = riesgo máximo siempre
+        return "Alto Riesgo"
+    if score >= 0.5:                      # 🔴 Alto
+        return "Alto Riesgo"
+    if score >= 0.25:                     # 🟠 Medio
+        return "Riesgo Medio"
+    return "Riesgo Bajo"                  # 🟢 Bajo
+```
+
+Los umbrales (`0.5` / `0.25`) están definidos como constantes `CHURN_HIGH_THRESHOLD` / `CHURN_MEDIUM_THRESHOLD`.
 
 **¿Por qué no un modelo de ML para churn?**
 1. Faltan datos etiquetados de churn real (necesitarías conectar con datos de retención post-venta)
@@ -61,12 +69,13 @@ Se convierte a número para promedios: `Alto=0.90`, `Medio=0.45`, `Bajo=0.10`.
 
 **Problema**: El modelo de ML no siempre detecta cuando un usuario quiere modificar un pedido (ej: "pedí la roja pero necesito la azul").
 
+Esta regla vive en `src/features/business_rules.py` como `MODIFY_ORDER_RULES`:
+
 ```python
-if ('cambi' in texto_min or 'modific' in texto_min) and \
-   ('talla' in texto_min or 'color' in texto_min or 'pedido' in texto_min):
-    es_modificacion = True
-elif 'pedí' in texto_min and 'necesito' in texto_min:
-    es_modificacion = True
+MODIFY_ORDER_RULES = [
+    (("cambi", "modific"), ("talla", "color", "pedido")),   # (grupo AND, grupo OR)
+    (("pedí",), ("necesito",)),
+]
 ```
 
 - Si se detecta modificación, baja el sentimiento a Neutral para no sesgar métricas
@@ -78,40 +87,49 @@ elif 'pedí' in texto_min and 'necesito' in texto_min:
 
 **Problema**: El modelo de 9 clases NO incluye `delete_account`. Sin esta regla, "quiero borrar mi cuenta" se clasifica como `gestion_cuenta` o `consulta_general`, perdiendo la señal de churn más crítica.
 
+Esta regla vive en `src/features/business_rules.py` como `DELETE_ACCOUNT_KEYWORDS` + la condición de que aparezca "cuenta"/"conta":
+
 ```python
-palabras_abandono = [
+DELETE_ACCOUNT_KEYWORDS = [
     'excluir', 'apagar minha conta', 'cancelar conta',
     'borrar mi cuenta', 'cancelar mi cuenta', 'eliminar',
     'elimino mi cuenta', 'cerrar mi cuenta', 'dar de baja', 'borrar cuenta'
 ]
-es_abandono = any(p in texto_min for p in palabras_abandono) and 'cuenta' in texto_min
+# Condición: any(kw in texto) AND ("cuenta" in texto OR "conta" in texto)
 ```
 
-Incluye palabras en español y portugués.
+Incluye palabras en español y portugués. `delete_account` es una intención **sintética** (no es clase del modelo), definida como `DELETE_ACCOUNT_INTENT` en el mismo módulo.
 
 ---
 
-## 5. Mapeo de 9 Clases (INTENT_LABEL_MAP)
+## 5. Taxonomía de Intenciones (unificada)
 
-**¿Por qué existe?** El modelo `Rosela/xlm-r-intent-espt` predice etiquetas en español (ej: `queja`), pero el dashboard original se diseñó con labels en inglés. El mapa traduce:
+**Contexto:** antes existía un `INTENT_LABEL_MAP` que traducía las etiquetas del modelo (español) a labels del dashboard (inglés): `cancelacion → cancel_order`, `queja → complaint`, etc. Eso generaba **dos taxonomías paralelas** y era fuente de bugs.
 
-| Label del modelo (ES) | Label del dashboard (EN) |
-|----------------------|-------------------------|
-| cancelacion | cancel_order |
-| consulta_general | contact_customer_service |
-| facturacion_pago | payment_issue |
-| feedback | review |
-| gestion_cuenta | edit_account |
-| modificacion_pedido | modify_order |
-| queja | complaint |
-| reembolso | get_refund |
-| seguimiento | track_order |
+**Solución (refactor):** se unificó todo a la taxonomía **española** canónica del modelo. Hoy hay una única fuente de verdad en `src/features/business_rules.py`:
 
 ```python
-df['Micro-Intención'] = [INTENT_LABEL_MAP.get(r['label'], 'consulta_general') for r in res_intent]
+INTENT_LABELS = [
+    "cancelacion", "consulta_general", "facturacion_pago", "feedback",
+    "gestion_cuenta", "modificacion_pedido", "queja", "reembolso", "seguimiento",
+]
+DELETE_ACCOUNT_INTENT = "delete_account"   # sintética, solo la generan las reglas
 ```
 
-Si el modelo devuelve una etiqueta no mapeada, cae a `consulta_general` como default.
+| Intención | Macro-intención | Nombre UI |
+|-----------|----------------|-----------|
+| cancelacion | Gestión de Pedidos | Cancelación |
+| modificacion_pedido | Gestión de Pedidos | Modificación Pedido |
+| seguimiento | Gestión de Pedidos | Seguimiento |
+| reembolso | Pagos y Reembolsos | Reembolso |
+| facturacion_pago | Pagos y Reembolsos | Facturación/Pago |
+| gestion_cuenta | Gestión de Cuenta | Gestión de Cuenta |
+| delete_account | Gestión de Cuenta | Eliminación de Cuenta |
+| queja | Quejas y Reclamos | Queja |
+| feedback | Feedback | Feedback |
+| consulta_general | Atención al Cliente | Consulta General |
+
+Los mapeos viven como `MACRO_INTENT_MAP`, `INTENT_DISPLAY` y las funciones `macro_intent()` / `display_intent()` en el mismo módulo.
 
 ---
 
@@ -125,31 +143,29 @@ Si el modelo devuelve una etiqueta no mapeada, cae a `consulta_general` como def
 | "Recebi o produto errado" | queja |
 | "Como faço para trocar a cor?" | modificacion_pedido |
 
-El `INTENT_LABEL_MAP` funciona igual para ambos idiomas. El idioma de cada mensaje se detecta aparte para la gráfica de evolución temporal.
+El idioma de cada mensaje se detecta aparte (para la gráfica de evolución temporal), pero la taxonomía de intenciones es única e independiente del idioma.
 
-**Problema de diseño**: Las labels solo están en español y se traducen con un mapa. Idealmente deberían ser bilingües consistentes (todo en inglés o códigos como `CANCEL_ORDER`).
+**Nota (resuelto en refactor)**: antes las labels solo estaban en español y se traducían con un mapa ES→EN. Eso ya no existe — se unificó todo a la taxonomía española canónica del modelo.
 
 ---
 
 ## 7. Carga de Modelos con Caché
 
 ```python
-@st.cache_resource 
-def load_ai_models():
-    intent_pipe = pipeline("text-classification", model="Rosela/xlm-r-intent-espt")
-    sentiment_pipe = pipeline("text-classification", model="Rosela/xlm-r-sentiment-espt")
-    return intent_pipe, sentiment_pipe
+@st.cache_resource
+def get_pipeline():
+    return ConversaAIPipeline()   # Orquestador de src/pipeline.py
 
-intent_clf, sentiment_clf = load_ai_models()
+pipeline = get_pipeline()
 ```
 
-- `@st.cache_resource` es un decorador de Streamlit que hace que la función se ejecute **una sola vez** y cachee el resultado. No importa cuántas veces recargues la página o interactúes — los modelos se cargan UNA VEZ.
+- `@st.cache_resource` es un decorador de Streamlit que hace que la función se ejecute **una sola vez** y cachee el resultado. No importa cuántas veces recargues la página o interactúes — el pipeline se carga UNA VEZ.
 - Los modelos se descargan de HF Hub (~556MB c/u).
-- `pipeline` de `transformers` hace TODO automáticamente:
+- Internamente, `ConversaAIPipeline` instancia `SentimentClassifier` e `IntentClassifier`, que usan `AutoModelForSequenceClassification.from_pretrained()` + `AutoTokenizer.from_pretrained()`:
   1. Descarga config.json, tokenizer, y pesos desde HF Hub
   2. Crea el tokenizer (XLM-R usa SentencePiece, un tokenizer basado en subword/byte-level BPE)
   3. Carga los pesos en la arquitectura correcta
-  4. Devuelve un callable que hace: `tokenize → forward pass → postprocess`
+  4. Hace `tokenize → forward pass → softmax` para producir probabilidades por clase
 
 ### ¿Qué contiene cada modelo?
 
@@ -408,82 +424,51 @@ Primero validar el negocio, después escalar la arquitectura.
 
 ## 11. Estructura del Proyecto
 
-> **NOTA**: La estructura original tenía todo dentro de `proyecto/`. Se reorganizó a una estructura plana profesional. Acá está la explicación de por qué.
-
 ```
-customer-support-nlp/
-├── app.py                          ← Dashboard Streamlit (deployado en HF Space)
-├── dashboard-streamlit/
-│   └── dashboard_app.py            ← Dashboard extendido (explorador, churn slider, etc.)
-├── src/                            ← Código fuente del pipeline (package Python)
+ConversaAI/
+├── app.py                          ← Dashboard Streamlit único (HF Space)
+├── requirements.txt                ← Dependencias
+├── Dockerfile                      ← Referencia (HF Space usa SDK streamlit)
+├── data/
+│   └── corpus_demo_bilingue.csv    ← 108 mensajes demo ES/PT
+├── notebooks/
+│   ├── sentiment_xlmr.ipynb.py     ← Fine-tuning sentimiento
+│   └── intent_xlmr.ipynb.py        ← Fine-tuning intención
+├── src/
 │   ├── pipeline.py                 ← Orquestador ConversaAIPipeline
 │   ├── data/processor.py           ← DataProcessor: normalización + tokenización
-│   ├── models/sentiment.py         ← SentimentClassifier (XLM-R + fallback)
-│   ├── models/intent.py            ← IntentClassifier (XLM-R + fallback)
-│   └── features/churn.py           ← ChurnScorer heurístico
+│   ├── models/
+│   │   ├── sentiment.py            ← SentimentClassifier (XLM-R + fallback)
+│   │   └── intent.py               ← IntentClassifier (XLM-R + fallback)
+│   └── features/
+│       ├── churn.py                ← ChurnScorer (fórmula única de churn)
+│       └── business_rules.py       ← Taxonomía + reglas de negocio + categorize_churn
 ├── scripts/
-│   └── pipeline_fallback.py        ← Pipeline 100% offline basado en keywords/regex
-├── notebooks/
-│   ├── sentiment_xlmr.ipynb.py     ← Fine-tuning XLM-R para sentimiento
-│   └── intent_xlmr.ipynb.py        ← Fine-tuning XLM-R para intención
-├── data/
-│   └── corpus_demo_bilingue.csv    ← 109 mensajes demo ES/PT
-├── tests/                          ← Suite de tests (61 tests pytest)
-│   ├── test_churn.py               ← 19 tests: scoring, pesos, frustración ES/PT
-│   ├── test_pipeline_fallback.py   ← 35 tests: sentimiento, intención, churn, batch
-│   └── test_processor.py           ← 7 tests: normalización de texto
-├── .github/workflows/
-│   ├── ci.yml                      ← CI: corre tests automáticamente en push/PR
-│   └── pages.yml                   ← Deploy dashboard-web a GitHub Pages
-├── Dockerfile                      ← Imagen Docker con precarga de modelos HF
-├── requirements.txt                ← Dependencias fusionadas (un solo archivo)
-├── README.md                       ← Documentación principal con badges
-└── APUNTES.md                      ← Esta guía de estudio
+│   └── pipeline_fallback.py        ← Pipeline rule-based offline (delega churn a ChurnScorer)
+├── tests/
+│   ├── test_processor.py           ← 7 tests — DataProcessor
+│   ├── test_churn.py               ← 19 tests — ChurnScorer
+│   ├── test_pipeline_fallback.py   ← 33 tests — FallbackPipeline
+│   ├── test_business_rules.py      ← 22 tests — reglas de negocio
+│   └── test_pipeline_batch.py      ← 3 tests — batch predict
+├── dashboard-web/                  ← Dashboard estático (Vercel/Pages, otro compañero)
+└── README.md
 ```
-
-### ¿Por qué es importante esta estructura?
-
-#### 1. Primera impresión profesional
-
-Un recruiter o ingeniero que entra al repo ve al instante que es un proyecto serio. `src/`, `tests/`, `.github/workflows/` hablan solos. `proyecto/` suena a tarea de curso, no a proyecto real.
-
-#### 2. `pip install -e .` compatible
-
-Con `src/` en la raíz podés hacer:
-
-```bash
-pip install -e .
-```
-
-Y el paquete queda instalado en el entorno. Con `proyecto/src/` necesitás andar manipulando `sys.path` manualmente en cada script (como se hacía antes en `dashboard_app.py`). Todos los proyectos open source serios (FastAPI, Pydantic, Transformers) usan esta estructura.
-
-#### 3. Tests visibles
-
-`tests/` al mismo nivel que `src/` comunica que hay cobertura de código. 61 tests documentan que el pipeline está verificado. El badge verde de CI en el README es prueba viva.
-
-#### 4. CI integrado
-
-Cada vez que hacés push a main, GitHub Actions corre los 61 tests automáticamente. Si alguien abre un PR y rompe algo, salta una alerta roja. Eso es ingeniería de software, no un script tirado ahí.
-
-#### 5. Estándar de la industria
-
-Esta estructura (src/, tests/, CI, README con badges) es la que usan los repositorios de FastAPI, Pydantic, Transformers de Hugging Face, etc. Cuando un recruiter ve eso, sabe que no estás codeando porque "funciona en mi máquina".
 
 ---
 
 ## 12. Flujo de app.py
 
 ```
-1. Configuración de página + carga de modelos (caché)
-2. load_sample_corpus() → lee el CSV demo
-3. procesar_dataframe(df) → pipeline completo:
-   a. Limpieza (encoding repair: latin1/cp1252 → utf-8)
-   b. Clasificación con modelos HF Hub
-   c. Reglas de negocio (modify_order, delete_account)
-   d. Macro-intenciones (agrupación en categorías de negocio)
-   e. Riesgo de churn (heurístico)
-4. mostrar_dashboard(df) → visualización con Plotly
-5. Tabs: Dashboard / Métricas / Prioridades
+1. Configuración de página + sidebar (fuente de datos + navegación)
+2. load_sample_corpus() → lee el CSV demo (o subida de CSV/Excel)
+3. run_analysis(data) → pipeline completo:
+   a. pipeline.batch_predict() → sentimiento + intención + churn (en batch real)
+   b. Reglas de negocio unificadas (apply_business_rules)
+   c. Macro-intenciones (macro_intent)
+   d. Riesgo de churn categorizado (categorize_churn)
+4. Visualización con Plotly (métricas, distribuciones, histograma, alertas)
+5. Navegación por páginas: 📊 Dashboard / 🔍 Explorar / 💡 Acciones
 ```
 
 ---
@@ -492,7 +477,7 @@ Esta estructura (src/, tests/, CI, README con badges) es la que usan los reposit
 
 | Modelo | Clases | Accuracy | Repo |
 |--------|--------|----------|------|
-| `Rosela/xlm-r-sentiment-espt` | Negative / Neutral / Positive | ~99.9% | [Link](https://huggingface.co/Rosela/xlm-r-sentiment-espt) |
+| `Rosela/xlm-r-sentiment-espt` | Negative / Neutral / Positive | ~92.2% | [Link](https://huggingface.co/Rosela/xlm-r-sentiment-espt) |
 | `Rosela/xlm-r-intent-espt` | 9 intenciones ES | ~97.85% | [Link](https://huggingface.co/Rosela/xlm-r-intent-espt) |
 
 ---
@@ -834,33 +819,35 @@ En `app.py`:
 
 ```python
 # Inicialización (solo la primera vez)
-if 'df_processed' not in st.session_state:
-    st.session_state.df_processed = None
+if "results_df" not in st.session_state:
+    st.session_state.results_df = None
 ```
 
 ```python
 # Guardar después de procesar
-st.session_state.df_processed = procesar_dataframe(df, uploaded_file)
+df_results, model_status = run_analysis(data)
+st.session_state.results_df = df_results
+st.session_state.model_status = model_status
 ```
 
 ```python
 # Leer en cualquier rerun
-if st.session_state.df_processed is not None:
-    mostrar_dashboard(st.session_state.df_processed)
+if st.session_state.results_df is not None:
+    show_dashboard(st.session_state.results_df)
 ```
 
 ### Flujo completo
 
 ```
-1er load: session_state.df_processed = None
+1er load: session_state.results_df = None
   ▼
-Usuario elige "Demo 108 mensajes" o sube CSV
+Usuario elige "Corpus de ejemplo" o sube CSV
   ▼
-procesar_dataframe() → guarda en session_state.df_processed
+run_analysis() → guarda en session_state.results_df
   ▼
 Rerun automático → lee de session_state → muestra dashboard
   ▼
-Usuario cambia filtros en sidebar → rerun → lee del mismo df_processed
+Usuario cambia filtros en sidebar → rerun → lee del mismo results_df
   ▼
 NUNCA vuelve a procesar el CSV → instantáneo
 ```
@@ -996,8 +983,8 @@ FallbackPipeline (pipeline_fallback.py)
   Solo re (stdlib de Python)
 
   predict_sentiment() → keywords ES/PT + detección de negación
-  predict_intent()    → regex patterns ES/PT (9 intents)
-  compute_churn()     → fórmula con pesos hardcodeados
+  predict_intent()    → regex patterns ES/PT (9 intents) + probabilidades
+  compute_churn()     → delega a ChurnScorer (fórmula única del proyecto)
 ```
 
 ### Dos implementaciones independientes
@@ -1007,12 +994,12 @@ FallbackPipeline (pipeline_fallback.py)
 | **Enfoque** | Rule-based puro desde cero | ML con degradación graceful |
 | **Sentiment** | Keywords ES/PT c/ negación | XLM-R → `nlptown/bert-base-multilingual-uncased-sentiment` |
 | **Intent** | Regex patterns | XLM-R → `MoritzLaurer/DeBERTa-v3-base-mnli` (zero-shot) |
-| **Churn** | Fórmula inline propia | `ChurnScorer` (clase separada, pesos configurables) |
-| **Dependencias** | Solo `re` | transformers, torch, modelos HF |
+| **Churn** | `ChurnScorer` (compartido) | `ChurnScorer` (misma clase) |
+| **Dependencias** | Solo `re` + `ChurnScorer` | transformers, torch, modelos HF |
 | **Velocidad** | Microsegundos por mensaje | 100-300ms por mensaje |
 | **Precisión** | Baja/Media | Alta (~97-99%) |
 
-Son **dos pipelines completamente separados**, no es que uno caiga en el otro. Comparten el mismo `ChurnScorer` en la lógica, pero cada uno tiene su propia implementación de churn.
+Son **dos pipelines separados** para sentimiento e intención (uno rule-based, otro ML), pero **comparten la MISMA implementación de churn**: `ChurnScorer` (`src/features/churn.py`). Antes cada uno tenía su propia fórmula de churn con pesos distintos; hoy es una sola.
 
 ### Cómo funciona `FallbackPipeline` paso a paso
 
@@ -1059,48 +1046,562 @@ Tres diccionarios bilingües ES/PT (~25-30 keywords cada uno):
 | `reembolso` | `reembols`, `devolver`, `garantía` | `reembols`, `devolver`, `estorno` |
 | `seguimiento` | `seguimient`, `tracking`, `rastre` | `acompanhament`, `tracking`, `rastrei` |
 
-**Regla:** cada regex que matchea suma 1.0 al score. Gana el intent con mayor score. Si hay empate o score 0 → `consulta_general` con prob 0.3. Probabilidad final: `min(score / 3.0, 0.95)`.
+**Regla:** cada regex que matchea suma 1.0 al score. Gana el intent con mayor score. Si hay empate o score 0 → `consulta_general` con prob 1.0. Las probabilidades se normalizan sobre las 9 clases (`score / total`), con la probabilidad del mejor capada a 0.95.
 
 #### 4. Churn scoring
 
-Tres componentes con pesos fijos:
+El churn **NO se recalcula** en el fallback: `compute_churn()` delega a `ChurnScorer.score()`, la misma fórmula del pipeline principal (`w1=0.3, w2=0.35, w3=0.35`). Para eso, `predict_intent()` ahora devuelve también un dict de `probabilities` sobre las 9 clases, que es lo que `ChurnScorer` necesita.
 
-| Componente | Peso | Explicación |
-|-----------|------|-------------|
-| Sentimiento negativo | `prob_negative * 0.5` | A mayor negatividad, mayor riesgo |
-| Frustración (keywords) | `min(count * 0.15, 0.3)` | Palabras como "urgente", "exijo", "no aguanto más" |
-| Intención de riesgo | 0.2 si intent ∈ {cancelacion, queja, reembolso} | Ciertas intenciones son red flag |
+### Churn: una sola fórmula (unificado)
 
-```python
-aggregate = min(sentiment_contrib + frustration_contrib + intent_contrib, 1.0)
-```
+Antes había **dos fórmulas de churn distintas** (`FallbackPipeline` usaba `0.5/0.15/0.2` y `ChurnScorer` usaba `0.3/0.35/0.35`), lo que hacía que el mismo mensaje diera números distintos según el pipeline. En el refactor se unificó: **ambos usan `ChurnScorer`**.
 
-### Churn: dos versiones distintas
+| Parámetro | Peso (único) |
+|-----------|--------------|
+| Sentimiento negativo | 0.3 |
+| Frustración (keywords) | 0.35 |
+| Intención de riesgo | 0.35 |
 
-El `ChurnScorer` de `ConversaAIPipeline` (en `churn.py`) tiene **pesos configurables** diferentes:
-
-| Parámetro | FallbackPipeline (hardcodeado) | ChurnScorer (default) |
-|-----------|-------------------------------|----------------------|
-| Sentimiento negativo | 0.5 | 0.3 |
-| Frustración keywords | 0.15 c/u, max 0.3 | 0.35 |
-| Intención de riesgo | 0.2 | 0.35 |
-
-Además `ChurnScorer` tiene `score_conversation()` con estrategia **worst-message-wins** (toma el mensaje más riesgoso de toda la conversación), mientras que `FallbackPipeline` solo analiza mensaje por mensaje.
+`ChurnScorer` además tiene `score_conversation()` con estrategia **worst-message-wins** (toma el mensaje más riesgoso de toda la conversación).
 
 ### app.py: el pipeline real
 
-El `app.py` del dashboard **NO usa** ninguna de las dos implementaciones anteriores. Carga los modelos XLM-R directamente con `pipeline()` de HuggingFace y aplica las reglas de negocio (modify_order, delete_account) inline. No tiene un "modo fallback" real — si los modelos no cargan, la app se detiene con `st.error()` + `st.stop()`.
+El `app.py` del dashboard usa **`ConversaAIPipeline`** (`src/pipeline.py`) — el mismo orquestador que une los clasificadores XLM-R + `ChurnScorer`. Después aplica las reglas de negocio unificadas (`apply_business_rules`) y categoriza el churn (`categorize_churn`). El pipeline tiene **modo fallback** integrado: si los modelos fine-tuneados no cargan, degrada gracefulmente a los fallbacks en vez de detener la app.
 
 ### ¿Cuándo usar cada uno?
 
 | Escenario | Pipeline |
 |-----------|----------|
-| Dashboard demo con modelos fine-tuneados disponibles | `app.py` (carga directa XLM-R) |
+| Dashboard demo con modelos fine-tuneados disponibles | `ConversaAIPipeline` (usado por `app.py`) |
 | Entorno sin GPU, sin conexión, o sin transformers | `FallbackPipeline` |
 | Sistema productivo con degradación graceful | `ConversaAIPipeline` |
 | Necesitás churn por conversación (no por mensaje) | `ConversaAIPipeline` + `ChurnScorer.score_conversation()` |
 
 La regla de oro: **el FallbackPipeline es para cuando NO hay ML disponible**. Si los modelos existen, siempre da mejores resultados usar XLM-R. El fallback rule-based es un "modo seguro" para que la app nunca se rompa.
+
+---
+
+## 20. CI/CD — Continuous Integration
+
+**¿Qué es CI?**
+
+CI = **Continuous Integration** (Integración Continua). Es una práctica donde cada cambio que subís a GitHub se **construye y testea automáticamente** en una máquina limpia. Si los tests pasan → ✅ verde. Si fallan → ❌ rojo, y no deberías mergear.
+
+**El workflow `.github/workflows/ci.yml`:**
+
+```yaml
+on:
+  push:
+    branches: [main]       # Cada push a main
+  pull_request:
+    branches: [main]       # Cada PR contra main
+```
+
+Cuando eso se dispara, GitHub Actions:
+1. Crea una VM **Ubuntu** limpia
+2. Hace `checkout` del código
+3. Setup **Python 3.11**
+4. Instala dependencias: `pip install -r requirements.txt`
+5. Corre todos los tests: `python -m pytest tests/ -v`
+
+**¿Por qué es importante para portafolio?**
+
+| Razón | Explicación |
+|-------|-------------|
+| **Estándar industrial** | TODA empresa seria bloquea PRs que rompen CI. No es opcional. |
+| **Confianza** | Un badge verde en el README dice "este código funciona" sin que nadie tenga que clonar y probar. |
+| **Detección temprana** | Si alguien pushea algo que rompe un test, CI avisa al INSTANTE, no 2 semanas después. |
+| **Reproducibilidad** | Corre en entorno limpio, no "en mi máquina funciona". |
+| **Profesionalismo** | Diferencia un proyecto tirado en GitHub de un repo SERIO. |
+
+**El badge en el README:**
+
+```markdown
+[![CI](https://github.com/tu-usuario/tu-repo/actions/workflows/ci.yml/badge.svg)](...)
+```
+
+Se actualiza solo. Si está verde, el repo está saludable. Si está rojo, hay que arreglarlo antes de seguir.
+
+---
+
+## 21. Tests — La Red de Seguridad
+
+Los tests no son burocracia. Son **lo que te permite cambiar código sin miedo**. Si rompés algo, los tests te avisan al instante en vez de descubrirlo en producción.
+
+### Estructura
+
+```
+tests/
+├── conftest.py              # Configuración global (agrega raíz al path)
+├── test_processor.py        # DataProcessor.normalize_text() — 7 tests
+├── test_churn.py            # ChurnScorer heurístico — 19 tests
+├── test_pipeline_fallback.py # FallbackPipeline completo — 33 tests
+├── test_business_rules.py   # Reglas de negocio + categorize_churn — 22 tests
+└── test_pipeline_batch.py   # batch_predict (inferencia en batch) — 3 tests
+```
+
+**Total: 84 tests.**
+
+---
+
+### `conftest.py` — El pegamento
+
+```python
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+```
+
+Agrega la raíz del proyecto al `sys.path` para que los tests puedan hacer `from src.data.processor import DataProcessor` sin romperse. Sin esto, Python no sabe dónde está `src/`.
+
+---
+
+### `test_processor.py` — 7 tests, 0 dependencias
+
+Testea **DataProcessor.normalize_text()**, la función que limpia texto antes de que entre al pipeline. Si el normalizador falla, el pipeline entero recibe basura. Son tests **determinísticos**: sin GPU, sin modelos, corren en milisegundos.
+
+| Test | ¿Qué prueba? | ¿Por qué importa? |
+|------|-------------|-------------------|
+| `test_normalize_text_removes_extra_spaces` | `"  HOLA   MUNDO  "` → `"HOLA MUNDO"` | Espacios extras crean tokens vacíos |
+| `test_normalize_text_handles_unicode` | Acentos y diéresis se conservan | ES/PT tienen acentos — romperlos es fatal |
+| `test_normalize_text_empty` | `""` → `""` | El pipeline no puede explotar con texto vacío |
+| `test_normalize_text_whitespace_only` | `"   "` → `""` | Ídem, caso borde |
+| `test_normalize_text_preserves_punctuation` | `¿?¡!` se conservan | En español los signos de pregunta importan |
+| `test_normalize_text_newlines_to_spaces` | `\n` → espacios | Los modelos esperan texto plano |
+| `test_normalize_text_tabs_to_spaces` | `\t` → espacios | El copypaste a veces pega tabs |
+
+---
+
+### `test_churn.py` — 19 tests
+
+Testea la **heurística de churn**: reglas de negocio que calculan riesgo de que un cliente se vaya. Componentes:
+
+**Pesos configurables:**
+- `test_default_weights` — Verifica pesos por defecto (w1=0.3, w2=0.35, w3=0.35)
+- `test_set_weights` — Verifica que se puedan cambiar
+
+**Casos extremos de scoring:**
+- `test_score_high_churn` → "Desisto, quiero cancelar mi cuenta" con sentimiento negativo. Espera `aggregate_score ≥ 0.7`. Si alguien toca los pesos y esto baja a 0.3, el test falla.
+- `test_score_low_churn` → "Excelente servicio" con sentimiento positivo. Espera `score ≤ 0.2`. Asegura que mensajes felices no sean falsos positivos.
+
+**Estrategia de conversación:**
+- `test_conversation_worst_message_wins` — Si en una conversación de 3 mensajes uno tiene score 0.9, el resultado final ES 0.9 (el peor mensaje define el riesgo). Decisión de negocio importante.
+- `test_conversation_empty` — Conversación vacía → score 0.0
+
+**Frustración por idioma:**
+- `test_frustration_keywords_es` — "pésimo" en español dispara frustración
+- `test_frustration_keywords_pt` — "péssimo" en portugués dispara frustración
+- `test_no_frustration_false_positive` — "Todo está perfecto, gracias" NO debe dar frustración. Evita falsos positivos.
+
+**Detección parametrizada:**
+```python
+@pytest.mark.parametrize("text,expected", [
+    ("queja", 1.0),
+    ("reclamo", 1.0),
+    ("não serve", 1.0),
+    ("felicidades", 0.0),
+    ("gracias", 0.0),
+])
+```
+5 casos en una línea. Si alguien agrega "felicitaciones" como keyword de frustración por error, este lo detecta.
+
+**Edge cases:**
+- `test_score_with_python_float_edge_cases` — Sentimiento negativo + intención riesgo, todo con prob 1.0. Verifica que aggregate esté entre 0 y 1. Sin este test, un día alguien cambia el cálculo y suma 2.5 sin caparlo.
+
+---
+
+### `test_pipeline_fallback.py` — 33 tests
+
+El más grande. Testea el **FallbackPipeline** (rule-based, sin GPU). Organizado en clases:
+
+**`TestDetectLanguage` (4 tests):**
+- ES: "hola buenos dias" → `"es"`
+- PT: "não obrigado" → `"pt"`
+- Múltiples marcadores PT: "péssimo atendimento, não funciona" → `"pt"`
+- Vacío: `""` → `"es"` (default seguro)
+
+**`TestSentiment` (8 tests):**
+- Un test por combinación: positivo/negativo/neutral en ES y PT
+- `test_empty_text` → no crashea, devuelve neutral con prob 1.0
+- `test_negation_flips_sentiment` → "Pésimo servicio, **no es bueno**": la negación "no" refuerza el negativo, no lo revierte
+- `test_has_probabilities` → el output tiene la estructura correcta (dict con `probabilities` anidado)
+- `test_sentiment_keywords_not_empty` — los diccionarios de keywords tienen datos
+
+**`TestIntent` (13 tests):**
+- **9 intenciones en español**: cancelacion, queja, consulta_general, feedback, reembolso, facturacion_pago, gestion_cuenta, seguimiento, modificacion_pedido
+- **2 intenciones en portugués**: cancelacion, queja
+- `test_empty_text` → vacío va a consulta_general (default)
+- `test_probability_range` → prob entre 0 y 1
+- `test_intent_patterns_defined` → verifica que los 9 intents tengan patrones. Si agregás un intent nuevo y olvidás los patrones, falla.
+
+**`TestChurn` (2 tests):**
+- `test_high_churn` — Pipeline completo: predice sentimiento → intención → churn en flujo real
+- `test_low_churn` — Ídem con mensaje feliz
+
+**`TestPipeline` (3 tests):**
+- `test_predict_full_output` — `predict()` devuelve dict con `text`, `sentiment`, `intent`, `churn`
+- `test_batch_predict` — 3 textos de entrada → 3 resultados
+- `test_get_model_status` — Siempre `{"sentiment": "fallback", "intent": "fallback"}`
+
+**`TestModificacionPedido` (2 tests):**
+- ES y PT — el intent con menos patrones, fácil de romper
+
+---
+
+### ¿Por qué 84 y no 5?
+
+Cada test cubre **un caso específico**. No es repetir lo mismo:
+
+```
+5 tests genéricos  → "uh, parece que funciona"
+84 tests específicos → "esto NO está roto en 84 escenarios distintos"
+```
+
+En producción, el caso que rompe todo es **siempre el que no testeaste**: el string vacío, los tabs, el portugués con acentos, la negación, la conversación de 3 mensajes donde uno es crítico, las reglas de negocio, el orden en batch predict. Los 84 tests cubren esos bordes.
+
+**Cómo correrlos:**
+```bash
+pytest tests/ -v              # Todos, con detalle
+pytest tests/test_churn.py    # Solo churn
+pytest tests/ -k "sentiment"  # Solo tests con "sentiment" en el nombre
+```
+
+---
+
+## 22. GitHub Actions en Profundidad
+
+GitHub Actions es el **asistente que trabaja gratis en tu repo**. Te da una máquina virtual cada vez que pasa algo en tu repo (push, PR, etc.) y ahí ejecutás lo que quieras.
+
+### Arquitectura: Eventos → Workflows → Jobs → Steps
+
+```
+[Evento] → dispara un [Workflow] → que tiene [Jobs] → cada Job tiene [Steps]
+```
+
+**Evento** = algo que pasa en GitHub:
+- `push` a main
+- `pull_request` abierto
+- `issues.opened` (cuando alguien crea un issue)
+- `workflow_dispatch` (lo disparás MANUAL desde la UI)
+- `schedule` (cron, tipo "corré esto todos los días a las 8am")
+
+**Workflow** = un archivo `.yml` en `.github/workflows/`. Cada archivo = un workflow distinto.
+
+**Job** = una unidad de trabajo. Los jobs pueden correr en paralelo o en secuencia. Cada job tiene un `runs-on:` que dice qué SO usar.
+
+**Step** = un comando individual dentro de un job. Podés usar `actions/checkout@v4` (baja el código) o cualquier comando bash con `run:`.
+
+### Anatomy de un workflow
+
+```yaml
+name: CI                              # Nombre visible en GitHub
+
+on:                                   # Eventos que lo disparan
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:                               # Nombre del job
+    runs-on: ubuntu-latest            # SO de la VM
+    
+    steps:
+      - uses: actions/checkout@v4     # Baja tu código
+      
+      - uses: actions/setup-python@v5 # Instala Python
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies    # Paso con nombre
+        run: pip install -r requirements.txt
+      
+      - name: Run tests
+        run: python -m pytest tests/ -v
+```
+
+**¿Qué hace GitHub cuando hacés push?**
+
+1. Ve el evento `push` en `main`
+2. Busca todos los `.yml` en `.github/workflows/`
+3. Encuentra este workflow, ve que el evento matchea
+4. Crea una VM **Ubuntu limpia** — nada instalado, como una compu recién formateada
+5. Ejecuta cada step en orden
+6. Si un step falla → todo el workflow falla → ❌ rojo
+7. Si todos pasan → ✅ verde
+
+### Cosas que no se ven a simple vista
+
+**Cada workflow corre en su propia máquina.** No comparte nada con otros workflows, no comparte archivos, no comparte variables de entorno. Es una VM efímera que se destruye al terminar.
+
+**`actions/*` son acciones reutilizables.** La comunidad publica acciones como si fueran librerías:
+
+| Acción | Qué hace |
+|--------|----------|
+| `actions/checkout@v4` | Baja tu código a la VM |
+| `actions/setup-python@v5` | Instala la versión de Python que digas |
+| `actions/upload-artifact@v4` | Guarda archivos generados (logs, builds) |
+| `actions/cache@v4` | Cachea dependencias para acelerar builds |
+
+**Cuando NO usás una action**, usás `run:` que es bash directo. Todo lo que se pueda hacer en terminal se puede acá.
+
+### ¿Dónde ves los resultados?
+
+En GitHub, arriba del repo hay una pestaña **Actions**:
+
+```
+Code  Issues  Pull requests  Actions  Projects  ...
+```
+
+Ahí ves el historial de todas las ejecuciones. Cada push genera una nueva entrada con:
+- ✅ Verde = pasó
+- ❌ Rojo = falló (con logs de qué step y por qué)
+- 🟡 Amarillo = está corriendo
+
+Si un test falla, entrás al workflow, ves el step que falló, y los logs completos.
+
+### ¿Qué más se puede hacer además de tests?
+
+| Caso | Ejemplo en el workflow |
+|------|------------------------|
+| Deploy automático | Cada push a main → build → deploy a producción |
+| Linting | Correr ruff (Python) o ESLint (JS) en cada PR |
+| Publicar a PyPI | Cuando creás un release, publicar automáticamente |
+| Build de Docker | Construir y pushear la imagen a Docker Hub |
+| Notificaciones | Mandar Slack cuando un PR está listo |
+
+### Lo que importa para tu portfolio
+
+No necesitás ser experto. El 80% de los workflows del mundo son casi idénticos al `ci.yml`. La diferencia entre alguien que "oyó hablar" y alguien que lo usó es:
+
+1. **Saber que existe** `.github/workflows/`
+2. **Entender** `on:` (eventos), `runs-on:` (SO), `steps:` (comandos)
+3. **Saber leer y modificar** un `.yml` de CI
+
+---
+
+## 23. Fine-Tuning de XLM-R
+
+**Modelo base:** `xlm-roberta-base` — 279M parámetros, multilingual (100 idiomas), pre-entrenado por Facebook. Es un transformer tipo BERT pero entrenado con 100 idiomas simultáneamente, lo que lo hace ideal para ES/PT.
+
+**Qué hicimos:**
+- Cargamos `xlm-roberta-base` y lo fine-tuneamos con datos propios
+- **2 modelos separados:** sentimiento (3 clases: positive, neutral, negative) e intención (9 clases)
+- Dataset bilingüe ES/PT con ~5k-10k mensajes etiquetados
+
+**Hiperparámetros típicos:**
+| Parámetro | Valor | ¿Por qué? |
+|-----------|-------|-----------|
+| Learning rate | `2e-5` | El estándar para fine-tuning de transformers. Más alto y desestabiliza los pesos pre-entrenados. |
+| Batch size | 16 | Límite de VRAM en una T4. Más grande = más estable, pero no entra. |
+| Épocas | 3-5 | Más de 10 es overfitting casi seguro. El modelo ya sabe lenguaje, solo necesita adaptarse. |
+| Optimizer | AdamW | Adam con weight decay. El estándar de la industria desde 2019. |
+| Scheduler | Linear warmup | Calienta el LR gradualmente las primeras steps, luego lo reduce linealmente. |
+
+**Métricas reportadas:**
+- Sentimiento: ~96% accuracy
+- Intención: ~97.85% accuracy
+
+**Interpretación crítica (esto te diferencia en entrevistas):**
+97% en intención suena increíble, PERO si `consulta_general` es el 60% del dataset, un modelo que siempre prediga `consulta_general` ya tiene 60% sin aprender NADA. El accuracy global miente cuando hay clases desbalanceadas. **Siempre pedir:**
+- Matriz de confusión (qué clases confunde con cuáles)
+- F1-score por clase (macro avg, no weighted)
+- Support (cuántos ejemplos tiene cada clase)
+
+**GPU:** Una sola T4 de Colab (~15GB VRAM). Tiempo: 30-60 min por modelo.
+
+**Los pesos NO están en el repo.** Están en HuggingFace Hub:
+- `Rosela/xlm-r-sentiment-espt` (~1GB)
+- `Rosela/xlm-r-intent-espt` (~1GB)
+- Se cargan con `AutoModelForSequenceClassification.from_pretrained()` (dentro de `SentimentClassifier`/`IntentClassifier`, vía `ConversaAIPipeline`)
+
+---
+
+## 24. Pipeline de Datos — El Viaje Completo
+
+```
+CSV crudo → reparar_texto() → ConversaAIPipeline.batch_predict() (sentimiento + intención + churn) → apply_business_rules() → categorize_churn() → Dashboard
+```
+
+**Paso a paso real en `app.py`:**
+
+| Paso | Función | Entrada → Salida | ¿Qué hace? |
+|------|---------|-----------------|------------|
+| 1 | `pd.read_csv()` | archivo.csv → DataFrame | Carga los datos |
+| 2 | `reparar_texto()` | "Ã±" → "ñ" | Corrige encoding roto. Sin esto los acentos son basura. |
+| 3 | `normalize_text()` | "HOLA  MUNDO\n" → "HOLA MUNDO" | Limpia espacios extra, tabs, newlines (dentro del pipeline) |
+| 4 | `batch_predict()` | lista de textos → sentimiento + intención + churn | Inferencia XLM-R **en batch real** (un forward por lote, no por mensaje) |
+| 5 | `apply_business_rules()` | (texto, intent, sentimiento) → corregidos | Corrige falsos positivos del modelo |
+| 6 | `categorize_churn()` | score 0-1 → "Alto/Medio/Bajo Riesgo" | Umbrales de negocio sobre la fórmula única |
+| 7 | Dashboard | DataFrame → gráficos | Streamlit + Plotly |
+
+**Las 6 reglas de negocio post-pipeline** (`apply_business_rules` en `src/features/business_rules.py`):
+1. **Eliminación de cuenta** → override a `delete_account` (intención sintética, siempre Alto Riesgo)
+2. **Cancelación de suscripción** → override a `cancelacion`
+3. **Modificación de pedido** (cambiar talla/color/pedido) → override a `modificacion_pedido` (y suaviza sentimiento negativo a neutral)
+4. **Positive + intención crítica** (cancelacion, queja, reembolso, facturacion_pago) → override a `feedback` (el modelo confunde quejas educadas con cancelaciones)
+5. **consulta_general + keywords de queja** ("pésimo", "estafa") → override a `queja` (y fuerza sentimiento negativo)
+6. **Positive + consulta_general + keywords de feedback** ("gracias", "excelente") → override a `feedback`
+
+**Arquitectura de pipeline real:** cada etapa recibe datos de la anterior, los transforma, y los pasa a la siguiente. Si el modelo fine-tuneado no carga, el pipeline **degrada gracefulmente** al fallback (no corta la app con `st.stop()`).
+
+---
+
+## 25. Docker
+
+**¿Qué es?** Una forma de empaquetar tu app + todo lo que necesita (Python, librerías, modelos) en un **contenedor** que corre igual en cualquier lado.
+
+**Nuestro Dockerfile:**
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY . .
+RUN pip install -r requirements.txt
+EXPOSE 8501
+CMD streamlit run app.py
+```
+
+| Instrucción | ¿Qué hace? |
+|-------------|------------|
+| `FROM python:3.11-slim` | Imagen base con Python 3.11, versión minimizada (sin compiladores, sin tools de sistema) |
+| `WORKDIR /app` | Crea `/app` como carpeta de trabajo |
+| `COPY . .` | Copia TODO el código del repo al contenedor |
+| `RUN pip install ...` | Instala dependencias |
+| `EXPOSE 8501` | Puerto de Streamlit |
+| `CMD streamlit run app.py` | Comando que se ejecuta al arrancar el contenedor |
+
+**Comandos para usarlo:**
+```bash
+docker build -t conversaai .          # Construir la imagen
+docker run -p 8501:8501 conversaai    # Correr el contenedor
+# Después abrís http://localhost:8501
+```
+
+**Docker NO es una VM:**
+- Una VM virtualiza hardware → corre un sistema operativo completo → pesa GB
+- Docker comparte el kernel del host → aísla solo el espacio de usuario → liviano
+- Se dice "Docker corre en **contenedores**, no en máquinas virtuales"
+
+**¿Por qué existe si ya tenemos HF Spaces?**
+- HF Spaces con SDK streamlit corre nuestra app, PERO atado a HF
+- Docker es **portable**: lo levantás en AWS, GCP, Azure, Railway, tu propio server, donde sea
+- El Dockerfile es el "plano" de tu infraestructura
+
+**Problema típico con `slim`:** Si necesitás compilar algo nativo (ciertas versiones de torch, numpy), `slim` no tiene compilador. Ahí usás `python:3.11` (la versión completa, ~300MB más pesada).
+
+---
+
+## 26. Deployment a HuggingFace Spaces
+
+**¿Qué es HF Spaces?** Es como Vercel/Netlify pero específico para apps de ML. Hosting gratuito con integración directa al Hub de modelos.
+
+**Dos formas de deploy:**
+
+| SDK streamlit | SDK docker |
+|---------------|------------|
+| HF crea el entorno automáticamente | Vos controlás TODO con tu Dockerfile |
+| Build rápido (2-3 min) | Build lento (15+ min por torch) |
+| Ideal para demos y portfolios | Para cuando necesitás algo no estándar |
+| **Este es el que usamos ahora** | Estaba antes |
+
+**Por qué cambiamos de docker a streamlit SDK:**
+- Build con Docker: 15+ min (descargaba torch + modelos cada vez)
+- Build con Streamlit SDK: 2-3 min (torch ya está pre-instalado, modelos se cachean)
+- Diferencia enorme en la práctica
+
+**Configuración en `README.md` del Space** (no confundir con el README del repo):
+```
+---
+title: ConversaAI Dashboard
+emoji: 🚀
+colorFrom: blue
+colorTo: purple
+sdk: streamlit
+sdk_version: 1.28.0
+app_file: app.py
+---
+```
+
+**Cómo se actualiza automáticamente:**
+1. Conectás el Space a tu repo de GitHub (Settings → Git)
+2. Cada push a `main` → HF detecta el cambio → rebuild
+3. El badge en el README del repo muestra el estado
+
+**Limitaciones que tenés que saber (para entrevistas):**
+- **Cold start:** Si nadie visita el Space por un rato, la VM se duerme. La próxima visita tarda ~30 seg en arrancar.
+- **Recursos limitados:** 2 vCPU, 16GB RAM (gratis). No corre modelos grandes (ni LLaMA, ni fine-tuning).
+- **No es para producción real:** Es para demos, portfolios, prototipos.
+- **Sin SSL personalizado:** Usás el subdominio de HF, no podés poner tu dominio.
+
+---
+
+## 27. Cloud Deployment (AWS / GCP / Azure)
+
+HF Spaces está buenísimo para portfolio, pero en la industria real se deploya en la nube. Los 3 grandes son **AWS** (Amazon), **GCP** (Google), **Azure** (Microsoft). Son más un ecosistema que un solo servicio.
+
+### Los servicios clave para ML
+
+| Categoría | AWS | GCP | Azure |
+|-----------|-----|-----|-------|
+| Cómputo (VMs) | EC2 | Compute Engine | Virtual Machines |
+| Contenedores | ECS / EKS | GKE | AKS |
+| Serverless | Lambda | Cloud Functions | Functions |
+| ML entrenamiento | SageMaker | Vertex AI | Azure ML |
+| ML inferencia | SageMaker | Vertex AI | Azure ML |
+| Base de datos | RDS | Cloud SQL | Azure SQL |
+| Almacenamiento | S3 | Cloud Storage | Blob Storage |
+| API Gateway | API Gateway | Cloud Endpoints | API Management |
+
+**No necesitás saberlos todos.** Si mencionás **S3** (AWS), **GKE** (GCP), y decís que son equivalentes entre sí, ya mostrás que entendés el concepto.
+
+### ¿Cómo deployarías ConversaAI en producción?
+
+**Opción barata (como HF Spaces pero en serio):**
+```
+1. Docker build → push a Container Registry (ECR/GCR/ACR)
+2. Correr el contenedor en Cloud Run (GCP) o App Runner (AWS)
+3. Conectar a una base de datos manejada (RDS/Cloud SQL)
+4. Ponerle un dominio custom con SSL
+```
+
+**Opción escalable (miles de requests por segundo):**
+```
+1. Modelo exportado a un endpoint dedicado (SageMaker / Vertex AI)
+2. API en contenedores auto-escalables (ECS/GKE/AKS)
+3. Load balancer adelante distribuyendo tráfico
+4. Base de datos con réplicas de lectura
+5. CDN para assets estáticos (CloudFront / Cloud CDN)
+```
+
+### ¿Cuál elegir?
+
+| Factor | AWS | GCP | Azure |
+|--------|-----|-----|-------|
+| ML nativo | SageMaker (más maduro) | Vertex AI (excelente integración con TF) | Azure ML (mejor integración con Office/Teams) |
+| Facilidad | Curva alta, muchísimos servicios | Más simple, UX más limpia | Buena si ya usás Microsoft |
+| Precio | Caro, paga por todo | Competitivo, descuentos por uso continuo | Similar a AWS |
+| Popularidad | ~60% del mercado | ~20% | ~20% |
+
+**Regla práctica:** La empresa donde trabajes ya eligió uno. Tu tarea es entender los conceptos (VMs, contenedores, serverless, auto-escalado), no saberte todos los servicios de los 3.
+
+### Conceptos que tenés que saber SÍ O SÍ
+
+| Concepto | Explicación |
+|----------|-------------|
+| **Auto-escalado** | La app arranca más servidores cuando hay más tráfico y los apaga cuando baja. Como tener Netflix que en hora pico usa más servidores que a las 4am. |
+| **Load Balancer** | Un "recepcionista" que distribuye requests entre múltiples servidores para que ninguno se sature. |
+| **Región** | Dónde están físicamente los servidores (us-east-1, eu-west-1, sa-east-1). Importante para latencia y leyes de datos. |
+| **Cold start** | El tiempo que tarda en arrancar un servidor que estaba apagado. En serverless (Lambda) puede ser 200ms-1s. |
+| **SLA** | Service Level Agreement. Cuánto tiempo de actividad garantiza el proveedor. AWS: 99.99% = ~4 min de caída por mes. |
+| **VPC / Red** | Tu red virtual aislada adentro de la nube. Los servidores no se exponen a internet directamente. |
+
+### Para tu portfolio: HF Spaces está bien
+
+No necesitás deployar en AWS para el portfolio. Lo que importa es que **sepás explicar**:
+1. "Esto está en HF Spaces como demo"
+2. "Si pasara a producción, lo metería en un contenedor Docker en Cloud Run"
+3. "El modelo lo serviría con un endpoint dedicado para no bloquear la UI"
+
+Eso muestra que entendés la diferencia entre demo y producción, que es lo que buscan en un ML Engineer Jr.
 
 ---
 

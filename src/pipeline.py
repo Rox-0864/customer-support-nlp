@@ -25,13 +25,7 @@ class ConversaAIPipeline:
 
     def predict(self, text: str) -> dict:
         if not text or not text.strip():
-            return {
-                "text": text,
-                "sentiment": {"label": "neutral", "probability": 1.0, "probabilities": {"negative": 0.0, "neutral": 1.0, "positive": 0.0}},
-                "intent": {"intent": "consulta_general", "probability": 1.0, "probabilities": {lbl: 0.0 for lbl in IntentClassifier.LABELS}},
-                "churn": {"aggregate_score": 0.0, "sentiment_contribution": 0.0, "frustration_contribution": 0.0, "intent_contribution": 0.0},
-                "model_status": self.get_model_status(),
-            }
+            return self._empty_result(text)
         sentiment = self.sentiment_classifier.predict_sentiment(text)
         intent = self.intent_classifier.predict_intent(text)
         churn = self.churn_scorer.score(sentiment, intent, text)
@@ -45,12 +39,55 @@ class ConversaAIPipeline:
         }
 
     def batch_predict(self, texts: List[str], batch_size: int = 16) -> List[dict]:
-        results: List[dict] = []
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start:start + batch_size]
-            for text in batch:
-                results.append(self.predict(text))
+        results: List[dict] = [None] * len(texts)
+        nonempty = [(i, t) for i, t in enumerate(texts) if t and t.strip()]
+        status = self.get_model_status()
+
+        for start in range(0, len(nonempty), batch_size):
+            chunk = nonempty[start:start + batch_size]
+            chunk_texts = [t for _, t in chunk]
+            sentiments = self.sentiment_classifier.predict_sentiment_batch(chunk_texts)
+            intents = self.intent_classifier.predict_intent_batch(chunk_texts)
+            for (idx, text), sentiment, intent in zip(chunk, sentiments, intents):
+                churn = self.churn_scorer.score(sentiment, intent, text)
+                results[idx] = {
+                    "text": text,
+                    "sentiment": sentiment,
+                    "intent": intent,
+                    "churn": churn,
+                    "model_status": status,
+                }
+
+        for i, text in enumerate(texts):
+            if results[i] is None:
+                results[i] = self._empty_result(text)
         return results
+
+    def _empty_result(self, text: str) -> dict:
+        intent_probs = {
+            lbl: (1.0 if lbl == "consulta_general" else 0.0)
+            for lbl in IntentClassifier.LABELS
+        }
+        return {
+            "text": text,
+            "sentiment": {
+                "label": "neutral",
+                "probability": 1.0,
+                "probabilities": {"negative": 0.0, "neutral": 1.0, "positive": 0.0},
+            },
+            "intent": {
+                "intent": "consulta_general",
+                "probability": 1.0,
+                "probabilities": intent_probs,
+            },
+            "churn": {
+                "aggregate_score": 0.0,
+                "sentiment_contribution": 0.0,
+                "frustration_contribution": 0.0,
+                "intent_contribution": 0.0,
+            },
+            "model_status": self.get_model_status(),
+        }
 
     def predict_conversation(self, messages: List[str]) -> dict:
         processed = [self.predict(msg) for msg in messages]
@@ -99,76 +136,3 @@ class ConversaAIPipeline:
             ),
         }
 
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    print("🧪 Running pipeline tests...\n")
-
-    pipeline = ConversaAIPipeline()
-
-    result_pos = pipeline.predict("Excelente servicio, muy bueno y fantástico")
-    assert result_pos["sentiment"]["label"] == "positive"
-    print(
-        f"✅ Test 1 — Sentimiento positivo: "
-        f"label={result_pos['sentiment']['label']}, "
-        f"prob={result_pos['sentiment']['probability']:.4f}"
-    )
-
-    try:
-        result_empty = pipeline.predict("")
-        assert result_empty["sentiment"]["label"] == "neutral"
-        assert result_empty["sentiment"]["probability"] == 1.0
-        print(
-            f"✅ Test 2 — Texto vacío: "
-            f"sentiment={result_empty['sentiment']['label']}, "
-            f"intent={result_empty['intent']['intent']}"
-        )
-    except Exception as exc:
-        raise AssertionError(f"Test 2 failed: empty text raised {exc}")
-
-    status = pipeline.get_model_status()
-    assert isinstance(status, dict)
-    assert "sentiment" in status
-    assert "intent" in status
-    assert status["sentiment"] in ("xlm-r", "fallback")
-    assert status["intent"] in ("xlm-r", "fallback")
-    print(
-        f"✅ Test 3 — Model status: "
-        f"sentiment={status['sentiment']}, intent={status['intent']}"
-    )
-
-    batch_results = pipeline.batch_predict(
-        ["Excelente servicio", "Pésimo atención, no sirve"]
-    )
-    assert isinstance(batch_results, list)
-    assert len(batch_results) == 2
-    for i, res in enumerate(batch_results):
-        assert "text" in res
-        assert "sentiment" in res
-        assert "intent" in res
-        assert "churn" in res
-        assert "model_status" in res
-    print(f"✅ Test 4 — batch_predict: {len(batch_results)} resultados correctos")
-
-    conv = pipeline.predict_conversation([
-        "Excelente servicio, muchas gracias",
-        "Pésimo, no sirve para nada, quiero cancelar",
-        "Buen producto en general",
-    ])
-    assert isinstance(conv, dict)
-    assert "messages" in conv
-    assert "aggregate_churn" in conv
-    assert "dominant_sentiment" in conv
-    assert "dominant_intent" in conv
-    assert len(conv["messages"]) == 3
-    assert "aggregate_score" in conv["aggregate_churn"]
-    assert isinstance(conv["dominant_sentiment"], str)
-    assert isinstance(conv["dominant_intent"], str)
-    print(
-        f"✅ Test 5 — predict_conversation: {len(conv['messages'])} mensajes, "
-        f"sentimiento dominante={conv['dominant_sentiment']}, "
-        f"intent dominante={conv['dominant_intent']}, "
-        f"churn agregado={conv['aggregate_churn']['aggregate_score']:.4f}"
-    )
-
-    print("\n🎉 Todos los tests pasaron.")

@@ -5,7 +5,7 @@
 [![Hugging Face](https://img.shields.io/badge/🤗-Models%20on%20HF%20Hub-yellow)](https://huggingface.co/Rosela)
 [![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red)](https://rosela-conversaai-dashboard.hf.space)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-61%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-84%20passing-brightgreen)](tests/)
 
 Pipeline de NLP para clasificar **sentimiento** (3 clases), **intención** (9 clases) y **riesgo de churn** en conversaciones de soporte al cliente en español y portugués.
 
@@ -55,26 +55,28 @@ Si los modelos fine-tuneados no están disponibles (sin GPU/local), el pipeline 
 
 ```
 ├── app.py                         # Dashboard Streamlit (HF Space)
-├── dashboard-streamlit/
-│   └── dashboard_app.py            # Dashboard extendido con explorador
 ├── src/
 │   ├── pipeline.py                 # Orquestador ConversaAIPipeline
 │   ├── data/processor.py           # DataProcessor: normalización + tokenización
 │   ├── models/
 │   │   ├── sentiment.py            # SentimentClassifier (XLM-R + fallback)
 │   │   └── intent.py               # IntentClassifier (XLM-R + fallback)
-│   └── features/churn.py           # ChurnScorer heurístico
+│   └── features/
+│       ├── churn.py                # ChurnScorer heurístico
+│       └── business_rules.py       # Taxonomía + reglas de negocio unificadas
 ├── scripts/
 │   └── pipeline_fallback.py        # Pipeline rule-based offline
 ├── notebooks/
 │   ├── sentiment_xlmr.ipynb.py     # Fine-tuning sentimiento
 │   └── intent_xlmr.ipynb.py        # Fine-tuning intención
 ├── data/
-│   └── corpus_demo_bilingue.csv    # 109 mensajes demo ES/PT
+│   └── corpus_demo_bilingue.csv    # 108 mensajes demo ES/PT
 ├── tests/
 │   ├── test_churn.py               # 19 tests — ChurnScorer
-│   ├── test_pipeline_fallback.py   # 35 tests — FallbackPipeline
-│   └── test_processor.py           # 7 tests — DataProcessor
+│   ├── test_pipeline_fallback.py   # 33 tests — FallbackPipeline
+│   ├── test_processor.py           # 7 tests — DataProcessor
+│   ├── test_business_rules.py      # 22 tests — reglas de negocio
+│   └── test_pipeline_batch.py      # 3 tests — batch predict
 ├── requirements.txt
 ├── Dockerfile
 └── .github/workflows/
@@ -90,18 +92,24 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-61 tests que cubren:
+84 tests que cubren:
 - **ChurnScorer**: scoring, pesos, detección de frustración ES/PT, conversaciones
 - **FallbackPipeline**: sentimiento por keywords, intención por regex, detección de idioma, churn, batch predict
 - **DataProcessor**: normalización de texto, unicode, espacios
+- **BusinessRules**: overrides de intención/sentimiento, taxonomía, categorización de churn
+- **Pipeline batch**: inferencia en batch real, preservación de orden, manejo de vacíos
 
 ## Dashboards
 
 ### Streamlit (HuggingFace Space)
 👉 [rosela-conversaai-dashboard.hf.space](https://rosela-conversaai-dashboard.hf.space)
 
-- `app.py` — Dashboard principal con 3 pestañas: análisis, métricas, prioridades
-- `dashboard-streamlit/dashboard_app.py` — Versión extendida con explorador de mensajes, histograma de churn interactivo, stacked bar intención vs sentimiento
+`app.py` — Dashboard único consolidado con navegación por páginas (Dashboard, Explorar, Acciones):
+- Métricas principales y distribución de sentimiento/intención
+- Explorador de mensajes con filtros y descarga CSV
+- Histograma de churn interactivo y tabla de alto riesgo
+- Stacked bar intención vs sentimiento y evolución temporal
+- Recomendaciones para el equipo de producto y alertas
 
 ### Dashboard Web (Vercel)
 👉 [s04-26-equipo-40-data-science.vercel.app](https://s04-26-equipo-40-data-science.vercel.app)
@@ -119,7 +127,7 @@ Los modelos fine-tuneados se descargan de HF Hub durante el build (~556MB c/u).
 
 ## Dataset demo
 
-`data/corpus_demo_bilingue.csv` — 109 mensajes bilingües ES/PT etiquetados para prueba.
+`data/corpus_demo_bilingue.csv` — 108 mensajes bilingües ES/PT etiquetados para prueba.
 Para cargarlos en el dashboard, seleccioná "Demo (108 mensajes)" en el sidebar.
 
 ## Modelos fine-tuneados (HF Hub)

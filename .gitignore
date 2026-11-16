@@ -38,7 +38,7 @@ Thumbs.db
 
 # ── Proyecto ConversaAI ──
 
-# Models locales (pesados ~2.2GB, descargar de Drive)
+# Modelos locales (pesos ~1.1GB descargados de HF Hub — NO commitear)
 /models/
 src/models/sentiment/
 src/models/intent/

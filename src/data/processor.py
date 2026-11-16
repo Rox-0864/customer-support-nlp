@@ -2,7 +2,7 @@
 DataProcessor — Preprocesamiento unificado ES/PT + tokenización XLM-R.
 
 Responsabilidad:
-  - Normalización de texto (lowercase, NFKC, espacios múltiples)
+  - Normalización de texto (NFKC, espacios múltiples, strip)
   - Tokenización con XLM-R (padding, truncation a max_length)
   - Procesamiento individual y por batches
 
@@ -107,54 +107,3 @@ class DataProcessor:
         """Retorna el tokenizer interno."""
         return self._tokenizer
 
-
-if __name__ == "__main__":
-    print("🧪 Running DataProcessor inline tests...\n")
-
-    # Test 1: Normalización
-    dp = DataProcessor()
-    result = dp.normalize_text("  HOLA   MUNDO!!  ")
-    expected = "HOLA MUNDO!!"
-    assert result == expected, f"normalize_text failed: {result!r} != {expected!r}"
-    print(f"✅ Test 1 — normalize_text: {result!r}")
-
-    # Test 2: Procesar texto simple no debe fallar
-    tokenized = dp.process("Excelente servicio, muchas gracias")
-    assert "input_ids" in tokenized, "process() debe retornar 'input_ids'"
-    assert "attention_mask" in tokenized, "process() debe retornar 'attention_mask'"
-    assert len(tokenized["input_ids"]) == 128, (
-        f"input_ids debe tener largo {dp.max_length}, "
-        f"tiene {len(tokenized['input_ids'])}"
-    )
-    print(f"✅ Test 2 — process texto simple: input_ids length = {len(tokenized['input_ids'])}")
-
-    # Test 3: Procesar texto vacío no debe fallar
-    empty_tokenized = dp.process("")
-    assert "input_ids" in empty_tokenized, "process('') debe retornar 'input_ids'"
-    assert "attention_mask" in empty_tokenized, "process('') debe retornar 'attention_mask'"
-    assert len(empty_tokenized["input_ids"]) == 128, (
-        f"input_ids de texto vacío debe tener largo {dp.max_length}, "
-        f"tiene {len(empty_tokenized['input_ids'])}"
-    )
-    print(f"✅ Test 3 — process texto vacío: input_ids length = {len(empty_tokenized['input_ids'])}")
-
-    # Test 4: process_batch
-    texts = ["Primer mensaje", "Segundo mensaje", "Tercer mensaje"]
-    batch_results = dp.process_batch(texts, batch_size=2)
-    assert len(batch_results) == 3, f"process_batch debe retornar 3 resultados, obtuvo {len(batch_results)}"
-    for i, res in enumerate(batch_results):
-        assert "input_ids" in res, f"Resultado {i} debe tener 'input_ids'"
-        assert "attention_mask" in res, f"Resultado {i} debe tener 'attention_mask'"
-        assert len(res["input_ids"]) == 128, (
-            f"Resultado {i} input_ids debe tener largo {dp.max_length}, "
-            f"tiene {len(res['input_ids'])}"
-        )
-    print(f"✅ Test 4 — process_batch: {len(batch_results)} resultados correctos")
-
-    # Test 5: get_tokenizer
-    tokenizer = dp.get_tokenizer()
-    assert tokenizer is not None, "get_tokenizer() no debe retornar None"
-    assert tokenizer.pad_token is not None, "pad_token no debe ser None"
-    print(f"✅ Test 5 — get_tokenizer: {type(tokenizer).__name__}, pad_token={tokenizer.pad_token!r}")
-
-    print("\n🎉 All tests passed!")
